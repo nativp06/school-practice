@@ -521,14 +521,37 @@ let S = {
   subSubject: '',
   qIndex: 0,
   difficulty: 1,
+  startDifficulty: 1,
   consecutiveCorrect: 0,
   correctCount: 0,
   sessionStart: 0,
   currentQ: null,
+  wrongAnswersThisSession: [],
   // ui helpers
   selectedOption: null,
-  historyFrom: null,   // which screen to go back to
+  historyFrom: null,
 };
+
+// ==================== ADAPTIVE HELPERS ====================
+function getPrevSessions(student, subject, subSubject) {
+  return (S.students[student]?.sessions || [])
+    .filter(s => s.subject === subject && s.subSubject === subSubject);
+}
+
+function computeStartDifficulty(prevSessions) {
+  if (!prevSessions.length) return 1;
+  const last = prevSessions[prevSessions.length - 1];
+  if (last.score >= 80) return Math.min(5, last.maxDifficulty + 1);
+  if (last.score >= 50) return Math.max(1, last.maxDifficulty);
+  return Math.max(1, last.maxDifficulty - 1);
+}
+
+function getPrevWrongAnswers(student, subject, subSubject) {
+  return getPrevSessions(student, subject, subSubject)
+    .slice(-3)
+    .flatMap(s => s.wrongAnswers || [])
+    .slice(-5);
+}
 
 // ==================== STORAGE ====================
 function loadData() {
@@ -679,13 +702,30 @@ function startSession() {
   if (!ss) { setAlert('subject-alert','אנא הכנס נושא לתרגול','error'); return; }
   S.subSubject = ss;
   S.qIndex = 0;
-  S.difficulty = 1;
   S.consecutiveCorrect = 0;
   S.correctCount = 0;
   S.sessionStart = Date.now();
   S.selectedOption = null;
+  S.wrongAnswersThisSession = [];
+
+  // חישוב רמת קושי התחלתית לפי היסטוריה
+  const prev = getPrevSessions(S.currentStudent, S.subject, S.subSubject);
+  S.difficulty = computeStartDifficulty(prev);
+  S.startDifficulty = S.difficulty;
+
   showScreen('session');
   document.getElementById('q-subject-badge').textContent = S.subject === 'math' ? '📐 מתמטיקה' : '🔤 אנגלית';
+
+  // הודעה לתלמיד אם הרמה הותאמה אישית
+  if (prev.length > 0) {
+    const lastScore = prev[prev.length - 1].score;
+    let adaptMsg = '';
+    if (lastScore >= 80) adaptMsg = `💪 הצלחת בתרגול הקודם (${lastScore}%) — מתחילים מרמה ${S.difficulty}!`;
+    else if (lastScore < 50) adaptMsg = `📖 נתרגל שוב — מתחילים מרמה ${S.difficulty} עד שנחזק את הבסיס.`;
+    else adaptMsg = `▶️ ממשיכים מהמקום שעצרנו — רמה ${S.difficulty}.`;
+    setAlert('session-alert', adaptMsg, 'info');
+  }
+
   loadNextQuestion();
 }
 
@@ -719,41 +759,79 @@ async function generateQuestion() {
   const subjectHe = S.subject === 'math' ? 'מתמטיקה' : 'אנגלית';
   const diffLabels = ['','קל מאוד','קל','בינוני','מתקדם','מאתגר מאוד'];
   const diffLabel = diffLabels[S.difficulty];
+  const isMath = S.subject === 'math';
 
-  const systemPrompt = `אתה מורה ישראלי מנוסה ומקצועי שיוצר שאלות לתרגול לתלמידים.
-עליך ליצור שאלות בהתאם לתכנית הלימודים הרשמית של ישראל (משרד החינוך).
-ענה אך ורק ב-JSON תקין, ללא כל טקסט נוסף לפני או אחרי ה-JSON.
-וודא שהשאלות מדויקות ומותאמות לגיל ולרמת הכיתה.`;
+  // ── שלב א': יצירת שאלה בלבד (ללא תשובה) ──
+  showLoading('יוצר שאלה...');
+  const sys1 = `אתה מורה ישראלי שיוצר שאלות תרגול לפי תכנית הלימודים הישראלית הרשמית.
+ענה אך ורק ב-JSON תקין, ללא כל טקסט נוסף.`;
 
-  const instrMath = `השאלה והסבר — הכל בעברית. הסבר צעד-אחר-צעד מפורט.`;
-  const instrEng = `השאלה עצמה באנגלית מתאימה לגיל, ההסבר בעברית בלבד.`;
+  // הקשר מתשובות שגויות קודמות
+  const prevWrong = getPrevWrongAnswers(S.currentStudent, S.subject, S.subSubject);
+  const wrongContext = prevWrong.length > 0
+    ? `\nבתרגולים קודמים התלמיד טעה בנושאים הבאים — תן לכך עדיפות בשאלה הנוכחית:\n` +
+      prevWrong.map(w => `• "${w.question}" — טעה: "${w.wrong}", נכון: "${w.correct}"`).join('\n')
+    : '';
 
-  const userMsg = `צור שאלת ${subjectHe} ל${gradeLabel} בנושא: "${S.subSubject}".
+  const msg1 = `צור שאלת ${subjectHe} ל${gradeLabel} בנושא: "${S.subSubject}".
 רמת קושי: ${S.difficulty}/5 (${diffLabel}).
-${S.subject === 'math' ? instrMath : instrEng}
+${isMath
+  ? 'השאלה בעברית תקנית בלבד. השתמש אך ורק במילים עבריות אמיתיות ומוכרות (לדוגמה: תפוחים, כדורים, ילדים, שקלים). אסור להמציא מילים, אסור לשלב אנגלית, אסור לכתוב תעתיקים.'
+  : 'השאלה עצמה באנגלית פשוטה ומתאימה לגיל, ללא עברית.'}${wrongContext}
+אל תכלול תשובה או הסבר — שאלה בלבד.
 
-בחר סוג שאלה מתאים. ענה אך ורק עם JSON באחד מהפורמטים:
+ענה עם JSON (בחר type מתאים):
+לשאלה פתוחה:     {"question":"...","type":"open"}
+לבחירה מרובה:   {"question":"...","type":"multiple_choice","options":["א. ...","ב. ...","ג. ...","ד. ..."]}`;
 
-לשאלה פתוחה:
-{"question":"...","type":"open","correct_answer":"...","explanation":"הסבר מפורט בעברית"}
+  const t1 = await callClaude(msg1, sys1);
+  const m1 = t1.match(/\{[\s\S]*\}/);
+  if (!m1) throw new Error('תגובה לא תקינה מה-AI (שלב יצירה)');
+  const qData = JSON.parse(m1[0]);
 
-לבחירה מרובה:
-{"question":"...","type":"multiple_choice","options":["א. ...","ב. ...","ג. ...","ד. ..."],"correct_answer":"א","explanation":"הסבר מפורט בעברית"}
+  // ── שלב ב': פתרון עצמאי ובדיקה כפולה ──
+  showLoading('מחשב ומאמת תשובה...');
+  const sys2 = isMath
+    ? `אתה מומחה מתמטיקה מדויק. אתה פותר שאלות מתמטיקה בזהירות רבה.
+חובה: חשב שלב-אחר-שלב, ואז בדוק את התשובה שלך שנית לפני שאתה מחזיר אותה.
+ענה אך ורק ב-JSON תקין, ללא כל טקסט נוסף.`
+    : `אתה מורה אנגלית מנוסה. ספק תשובה נכונה והסבר ברור.
+ענה אך ורק ב-JSON תקין, ללא כל טקסט נוסף.`;
 
-דגשים:
-- ל-multiple_choice: correct_answer חייב להיות רק האות (א/ב/ג/ד)
-- ל-open: correct_answer חייב להיות התשובה המדויקת
-- ההסבר חייב להסביר שלב-אחר-שלב איך מגיעים לתשובה`;
+  const optsLine = qData.type === 'multiple_choice'
+    ? `\nאפשרויות: ${qData.options.join(' | ')}` : '';
+  const ansFormat = qData.type === 'multiple_choice'
+    ? 'correct_answer חייב להיות רק האות (א/ב/ג/ד).'
+    : 'correct_answer חייב להיות התשובה המדויקת בלבד (מספר או טקסט קצר).';
 
-  const text = await callClaude(userMsg, systemPrompt);
-  const match = text.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error('תגובה לא תקינה מה-AI');
-  return JSON.parse(match[0]);
+  const msg2 = isMath
+    ? `פתור את שאלת המתמטיקה הבאה עבור תלמיד ${gradeLabel}:
+"${qData.question}"${optsLine}
+
+הנחיות פתרון:
+1. רשום את כל שלבי החישוב
+2. חשב כל שלב בקפידה
+3. בדוק את התשובה הסופית שלך שוב לפני שאתה מחזיר
+${ansFormat}
+
+ענה עם JSON: {"correct_answer":"...","explanation":"הסבר שלב-אחר-שלב בעברית"}`
+    : `ענה על שאלת האנגלית הבאה עבור תלמיד ${gradeLabel}:
+"${qData.question}"${optsLine}
+
+${ansFormat}
+ענה עם JSON: {"correct_answer":"...","explanation":"הסבר בעברית"}`;
+
+  const t2 = await callClaude(msg2, sys2);
+  const m2 = t2.match(/\{[\s\S]*\}/);
+  if (!m2) throw new Error('תגובה לא תקינה מה-AI (שלב פתרון)');
+  const ansData = JSON.parse(m2[0]);
+
+  return { ...qData, ...ansData };
 }
 
 // ==================== SESSION FLOW ====================
 async function loadNextQuestion() {
-  showLoading('מייצר שאלה...');
+  showLoading('יוצר שאלה...');
   document.getElementById('session-alert').innerHTML = '';
   try {
     const q = await generateQuestion();
@@ -857,6 +935,12 @@ function checkAnswer(studentAns) {
     }
   } else {
     S.consecutiveCorrect = 0;
+    // שמור תשובה שגויה להתאמה עתידית
+    S.wrongAnswersThisSession.push({
+      question: q.question,
+      wrong: studentAns,
+      correct: q.correct_answer
+    });
     if (q.type === 'multiple_choice') {
       highlightMC(q.correct_answer, S.selectedOption);
       disableMC();
@@ -934,8 +1018,10 @@ function endSession() {
     score,
     correct: S.correctCount,
     total: TOTAL_Q,
+    startDifficulty: S.startDifficulty,
     maxDifficulty: S.difficulty,
-    duration
+    duration,
+    wrongAnswers: S.wrongAnswersThisSession.slice(0, 5)
   };
 
   if (!S.students[S.currentStudent].sessions) S.students[S.currentStudent].sessions = [];
