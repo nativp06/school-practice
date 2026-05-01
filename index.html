@@ -729,6 +729,24 @@ function startSession() {
   loadNextQuestion();
 }
 
+// ==================== JSON EXTRACTION ====================
+function extractJSON(text) {
+  // הסר גושי markdown כמו ```json ... ```
+  const stripped = text.replace(/```(?:json)?\s*/gi, '').replace(/```/g, '');
+  // מצא את ה-JSON object הראשון
+  const match = stripped.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error('לא נמצא JSON בתגובה');
+  // נקה תווי בקרה שעלולים לשבש פרסינג
+  const clean = match[0].replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+  try {
+    return JSON.parse(clean);
+  } catch(e) {
+    // ניסיון אחרון: חתוך בסוף ה-} האחרון
+    const lastBrace = clean.lastIndexOf('}');
+    return JSON.parse(clean.slice(0, lastBrace + 1));
+  }
+}
+
 // ==================== API ====================
 async function callClaude(userMsg, systemPrompt, model = 'claude-haiku-4-5-20251001') {
   const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -785,9 +803,7 @@ ${isMath
 לבחירה מרובה:   {"question":"...","type":"multiple_choice","options":["א. ...","ב. ...","ג. ...","ד. ..."]}`;
 
   const t1 = await callClaude(msg1, sys1);
-  const m1 = t1.match(/\{[\s\S]*\}/);
-  if (!m1) throw new Error('תגובה לא תקינה מה-AI (שלב יצירה)');
-  const qData = JSON.parse(m1[0]);
+  const qData = extractJSON(t1);
 
   // ── שלב ב': פתרון עצמאי ובדיקה כפולה ──
   showLoading('מחשב ומאמת תשובה...');
@@ -823,9 +839,7 @@ ${ansFormat}
 
   // שלב הפתרון משתמש ב-Sonnet לדיוק מקסימלי בחישובים
   const t2 = await callClaude(msg2, sys2, 'claude-sonnet-4-6');
-  const m2 = t2.match(/\{[\s\S]*\}/);
-  if (!m2) throw new Error('תגובה לא תקינה מה-AI (שלב פתרון)');
-  const ansData = JSON.parse(m2[0]);
+  const ansData = extractJSON(t2);
 
   return { ...qData, ...ansData };
 }
